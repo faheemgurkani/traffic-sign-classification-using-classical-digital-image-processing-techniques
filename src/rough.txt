@@ -1,0 +1,677 @@
+pipeline.py:
+import numpy as np
+import cv2
+
+import os
+import csv
+
+from image_io import read_image
+from filters import mean_filter, gaussian_filter, median_filter, adaptive_median_filter, unsharp_mask
+from segmentation import rgb_to_hsv, threshold_mask, erode, dilate, opening, remove_small_components, fill_holes
+from edge_detection import canny_edge
+from normalization import affine_transform
+from features import harris_corners, compute_circularity, aspect_ratio_and_extent, average_hue, extract_roi_props, count_vertices
+from classifier import classify_sign
+
+
+
+def process_image(path):
+    img = read_image(path)
+    
+    if img is None:
+        print(f"\n[Warning] Could not read image: {path}")
+    
+        return None, None
+
+    height, width = img.shape[:2]
+
+    # Filtering
+    f1 = mean_filter(img)
+    f2 = gaussian_filter(f1, sigma=1.0)
+    f3 = median_filter(f2)
+    f4 = adaptive_median_filter(f3)
+    sharp = unsharp_mask(f4, sigma=1.0, strength=1.5)
+    
+    # Segmentation
+    hsv = rgb_to_hsv(sharp)
+    mask_r = threshold_mask(hsv, 'red')
+    mask_b = threshold_mask(hsv, 'blue')
+    mask = mask_r if mask_r.sum() > mask_b.sum() else mask_b
+    # m = opening(dilate(erode(mask)))
+    # m = remove_small_components(m, min_area=100)
+    # m = fill_holes(m)
+    m = opening(mask)
+    m = remove_small_components(m, min_area=100)
+    m = fill_holes(m)
+    
+    # Edge detection
+    gray = cv2.cvtColor(sharp, cv2.COLOR_RGB2GRAY)
+    edges = canny_edge(gray)
+    
+    # Normalization (identity here; placeholder)
+    norm = sharp
+    
+    # Feature extraction
+    # features = {}
+    # features['width'], features['height'], \
+    # features['roi_x1'], features['roi_y1'], \
+    # features['roi_x2'], features['roi_y2'] = extract_roi_props(m)
+    # features['corners'] = harris_corners(cv2.cvtColor(norm, cv2.COLOR_RGB2GRAY))
+    
+    features = {}
+    w, hgt, x1, y1, x2, y2 = extract_roi_props(m)
+    features['width'], features['height'] = w, hgt
+    features['roi_x1'], features['roi_y1'] = x1, y1
+    features['roi_x2'], features['roi_y2'] = x2, y2
+
+    # # only look at the ROI in the grayscale image, masked by your segmentation
+    # gray_full = cv2.cvtColor(norm, cv2.COLOR_RGB2GRAY)
+    # # crop to ROI, then mask out anything outside the sign
+    # roi_gray = gray_full[y1:y2+1, x1:x2+1]
+    # roi_mask = m[y1:y2+1, x1:x2+1].astype(bool)
+    # # zero out background
+    # roi_gray_masked = roi_gray * roi_mask
+    # features['corners'] = harris_corners(roi_gray_masked)
+
+    # roi_mask = m[y1:y2+1, x1:x2+1].astype(np.uint8)
+    # features['corners'] = harris_corners(roi_mask)
+
+    se = np.ones((3,3), dtype=np.uint8)
+    eroded_mask = erode(m, se)
+    border_mask = (m.astype(np.uint8) - eroded_mask)
+    features['corners'] = count_vertices(border_mask)
+    
+    features['circ'] = compute_circularity(m)
+    features['ar'], features['extent'] = aspect_ratio_and_extent(m)
+    features['avg_hue'] = average_hue(hsv, m)
+    features['mask_color'] = 'red' if mask is mask_r else 'blue'
+    
+    # Classification
+    cid = classify_sign(features)
+
+    # For, testing
+    print(f"cid: {cid}, features: {features}")
+    
+    return cid, features
+
+def run_pipeline(selected_csv, data_root, output_results):
+    results_dir = os.path.dirname(output_results)
+
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+
+        print(f"[Info] Created directory: {results_dir}")
+
+    total = sum(1 for _ in open(selected_csv)) - 1  # excluding the header
+
+    processed = 0
+
+    with open(selected_csv) as f, open(output_results, 'w', newline='') as out:
+        reader = csv.DictReader(f)
+        writer = csv.writer(out)
+
+        writer.writerow(['filename', 'ground_truth', 'predicted', 'correct', 'width', 'height', 'roi_x1', 'roi_y1', 'roi_x2', 'roi_y2'])
+
+        print("\n[Info] Starting pipeline...")
+        print(f"\n[Info] Total images to process: {total}")
+        print()
+        for idx, row in enumerate(reader):
+            
+            if idx == 7:
+                break
+
+            rel = row['Path']
+            gt = int(row['ClassId'])
+            path = os.path.join(data_root, rel)
+            
+            pred, feats = process_image(path)
+
+            if pred is None:
+                pred = -1  # if image couldn't be processed, mark as unknown class
+
+            correct = int(pred == gt)
+            
+            writer.writerow([
+                rel, gt, pred, correct,
+                feats.get('width'), feats.get('height'),
+                feats.get('roi_x1'), feats.get('roi_y1'),
+                feats.get('roi_x2'), feats.get('roi_y2')
+            ])
+            
+            processed += 1
+            
+            print(f"[Progress] Processed {processed}/{total}: {rel} (GT: {gt}, Predicted: {pred})")
+
+        print("\n[Info] Pipeline completed.")
+    print(f"\n[Done] Results written to {output_results}")
+
+
+
+if __name__ == '__main__':
+    selected_csv = '../data/selected.csv'
+    data_root = '../data/selected'
+    output_results = '../results/results.csv'  
+    run_pipeline(selected_csv, data_root, output_results)
+
+classifier.py:
+import numpy as np
+
+
+
+# def classify_sign(features):
+#     # features: dict with keys: 'avg_hue','circ','ar','extent','corners','mask_color'
+#     hue = features['avg_hue']
+#     circ = features['circ']
+#     ar, extent = features['ar'], features['extent']
+#     corners = features['corners']
+#     color = features['mask_color']
+    
+#     # Example rules:
+#     # allow “circular” signs with very few corners detected
+#     if color == 'red' and circ > 0.6 and corners <= 2:
+#         return 0   # Speed Limit 20
+#     if color == 'red' and corners==8:
+#         return 14  # Stop sign
+#     if color == 'red' and ar>0.8 and ar<1.2 and corners==3:
+#         return 13  # Yield sign
+#     if color == 'blue' and circ<0.5 and ar>1.5:
+#         return 38  # Keep right
+    
+#     # fallback
+#     return -1
+
+def classify_sign(features):
+    hue = features['avg_hue']
+    circ = features['circ']
+    corners = features['corners']
+    ar = features['ar']
+    color = features['mask_color']
+
+    # Speed Limit: almost perfect circle, hardly any vertices
+    if color=='red' and circ>0.6 and corners<=1:
+        return 0
+    # Stop Sign: exactly 8 polygon corners
+    if color=='red' and corners==8:
+        return 14
+    # Yield Sign: triangle (3 vertices)
+    if color=='red' and corners==3:
+        return 13
+    # Keep Right: L-shaped arrow (4 vertices + aspect ratio)
+    if color=='blue' and corners==4 and ar>1.2:
+        return 38
+
+    return -1
+
+features.py:
+import numpy as np
+from scipy import ndimage
+
+
+
+def harris_corners(gray, window=3, k=0.04, thresh=1e-5):
+    # gradients
+    gx = ndimage.sobel(gray, axis=1)
+    gy = ndimage.sobel(gray, axis=0)
+    Ixx = gx*gx
+    Iyy = gy*gy
+    Ixy = gx*gy
+    
+    # response
+    offset = window//2
+    R = np.zeros_like(gray, dtype=np.float32)
+    
+    for y in range(offset, gray.shape[0]-offset):
+    
+        for x in range(offset, gray.shape[1]-offset):
+            Sxx = Ixx[y-offset:y+offset+1, x-offset:x+offset+1].sum()
+            Syy = Iyy[y-offset:y+offset+1, x-offset:x+offset+1].sum()
+            Sxy = Ixy[y-offset:y+offset+1, x-offset:x+offset+1].sum()
+            det = (Sxx * Syy) - (Sxy**2)
+            trace = Sxx + Syy
+            R[y, x] = det - k * (trace**2)
+    
+    # non-max suppression
+    corners = (R > thresh)
+    
+    return np.count_nonzero(corners)
+
+def count_vertices(mask):
+    """Count polygon vertices from the largest contour in a binary mask."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return 0
+    
+    cnt = max(contours, key=cv2.contourArea)
+    peri = cv2.arcLength(cnt, True)
+    epsilon = 0.02 * peri
+    approx = cv2.approxPolyDP(cnt, epsilon, True)
+    
+    return len(approx)
+
+def compute_circularity(mask):
+    # mask: binary
+    area = np.count_nonzero(mask)
+    
+    # perimeter via edge detection on mask
+    eroded = ndimage.binary_erosion(mask)
+    perimeter = area - np.count_nonzero(eroded)
+    
+    if perimeter == 0:
+        return 0
+    
+    return (4 * np.pi * area) / (perimeter**2)
+
+def aspect_ratio_and_extent(mask):
+    y_idxs, x_idxs = np.nonzero(mask)
+
+    if x_idxs.size == 0 or y_idxs.size == 0:
+        return 0.0, 0.0  # Safe default values if mask is empty
+
+    min_x, max_x = x_idxs.min(), x_idxs.max()
+    min_y, max_y = y_idxs.min(), y_idxs.max()
+    width = max_x - min_x + 1
+    height = max_y - min_y + 1
+    area = mask.sum()
+    bbox_area = width * height
+    ar = width / float(height) if height > 0 else 0.0
+    extent = area / float(bbox_area) if bbox_area > 0 else 0.0
+
+    return ar, extent
+
+def average_hue(hsv, mask):
+    h = hsv[...,0]
+    vals = h[mask.astype(bool)]
+    
+    return float(vals.mean()) if vals.size>0 else 0.0
+
+def extract_roi_props(mask):
+    """
+    Compute ROI bounding box and image dims from binary mask.
+    Returns: (width, height, x1, y1, x2, y2)
+    where (x1,y1) is top-left and (x2,y2) bottom-right of ROI.
+    """
+    y_idxs, x_idxs = np.nonzero(mask)
+
+    if x_idxs.size == 0 or y_idxs.size == 0:
+        return 0, 0, 0, 0, 0, 0
+    
+    x1, x2 = x_idxs.min(), x_idxs.max()
+    y1, y2 = y_idxs.min(), y_idxs.max()
+    width = x2 - x1 + 1
+    height = y2 - y1 + 1
+    
+    return width, height, x1, y1, x2, y2
+
+normalization.py:
+import numpy as np
+
+
+
+def affine_transform(img, matrix, output_shape):
+    h_out, w_out = output_shape
+    inv = np.linalg.inv(np.vstack([matrix, [0,0,1]]))
+    out = np.zeros((h_out, w_out, img.shape[2]), dtype=img.dtype)
+
+    for y in range(h_out):
+
+        for x in range(w_out):
+            src = inv.dot([x, y, 1])
+            sx, sy = src[0], src[1]
+
+            if 0 <= sx < img.shape[1]-1 and 0 <= sy < img.shape[0]-1:
+                x0, y0 = int(sx), int(sy)
+                dx, dy = sx-x0, sy-y0
+
+                # bilinear interp
+                for c in range(img.shape[2]):
+                    v = (img[y0, x0, c] * (1-dx)*(1-dy) +
+                         img[y0, x0+1, c] * dx*(1-dy) +
+                         img[y0+1, x0, c] * (1-dx)*dy +
+                         img[y0+1, x0+1, c] * dx*dy)
+
+                    out[y, x, c] = int(v)
+
+    return out
+
+edge_detection.py:
+import numpy as np
+from scipy import ndimage
+
+
+
+def sobel_gradients(gray):
+    Kx = np.array([[-1,0,1],[-2,0,2],[-1,0,1]], dtype=np.float32)
+    Ky = Kx.T
+    gx = ndimage.convolve(gray.astype(np.float32), Kx)
+    gy = ndimage.convolve(gray.astype(np.float32), Ky)
+
+    return gx, gy
+
+def non_max_suppression(mag, angle):
+    H, W = mag.shape
+    out = np.zeros((H,W), dtype=np.float32)
+    angle = angle * 180.0 / np.pi
+    angle[angle < 0] += 180
+    
+    for i in range(1, H-1):
+    
+        for j in range(1, W-1):
+            q = 255; r = 255
+    
+            # angle 0
+            if (0 <= angle[i,j] < 22.5) or (157.5 <= angle[i,j] <= 180):
+                q = mag[i, j+1]; r = mag[i, j-1]
+    
+            # angle 45
+            elif (22.5 <= angle[i,j] < 67.5):
+                q = mag[i-1, j+1]; r = mag[i+1, j-1]
+    
+            # 90
+            elif (67.5 <= angle[i,j] < 112.5):
+                q = mag[i-1, j]; r = mag[i+1, j]
+    
+            # 135
+            elif (112.5 <= angle[i,j] < 157.5):
+                q = mag[i-1, j-1]; r = mag[i+1, j+1]
+    
+            if (mag[i,j] >= q) and (mag[i,j] >= r):
+                out[i,j] = mag[i,j]
+    
+    return out
+
+def double_threshold_and_hysteresis(nms, low, high):
+    strong = (nms >= high)
+    weak = ((nms >= low) & (nms < high))
+    result = np.zeros_like(nms, dtype=np.uint8)
+    result[strong] = 255
+    H, W = nms.shape
+    
+    # Hysteresis
+    for i in range(1, H-1):
+    
+        for j in range(1, W-1):
+    
+            if weak[i,j] and ((result[i+1,j] == 255) or (result[i-1,j] == 255)
+                              or (result[i,j+1] == 255) or (result[i,j-1] == 255)
+                              or (result[i+1,j+1] == 255) or (result[i-1,j-1] == 255)
+                              or (result[i+1,j-1] == 255) or (result[i-1,j+1] == 255)):
+    
+                result[i,j] = 255
+    
+    return result
+
+def canny_edge(gray, low=50, high=150):
+    gx, gy = sobel_gradients(gray)
+    mag = np.hypot(gx, gy)
+    angle = np.arctan2(gy, gx)
+    nms = non_max_suppression(mag, angle)
+    edges = double_threshold_and_hysteresis(nms, low, high)
+    
+    return edges
+
+segmentation.py:
+import numpy as np
+from scipy import ndimage
+
+
+
+def rgb_to_hsv(img):
+    # Input: img in RGB [0,255]
+    rgb = img.astype('float32') / 255.0
+    r, g, b = rgb[...,0], rgb[...,1], rgb[...,2]
+    c_max = rgb.max(axis=2)
+    c_min = rgb.min(axis=2)
+    delta = c_max - c_min
+    h = np.zeros_like(c_max)
+    mask = delta != 0
+
+    # Hue calculation
+    idx = (c_max == r) & mask
+    h[idx] = ((g[idx] - b[idx]) / delta[idx]) % 6
+    idx = (c_max == g) & mask
+    h[idx] = (b[idx] - r[idx]) / delta[idx] + 2
+    idx = (c_max == b) & mask
+    h[idx] = (r[idx] - g[idx]) / delta[idx] + 4
+    # h = h * 60
+    # h[h < 0] += 360
+    
+    # convert to degrees
+    h = h * 60
+    h[h < 0] += 360
+    # scaling to OpenCV's 0–180 hue range
+    h = h / 2.0
+
+    # Saturation
+    s = np.where(c_max == 0, 0, delta / c_max)
+
+    # Value
+    v = c_max
+
+    return np.stack([h, s*255, v*255], axis=2).astype(np.uint8)
+
+def threshold_mask(hsv, color):
+    h, s, v = hsv[...,0], hsv[...,1], hsv[...,2]
+    
+    if color == 'red':
+        mask1 = (h <= 15) | (h >= 165)
+        mask2 = (s >= 100) & (v >= 80)
+    
+        return (mask1 & mask2).astype(np.uint8)
+
+    elif color == 'blue':
+        mask = (h >= 100) & (h <= 130) & (s >= 100) & (v >= 80)
+    
+        return mask.astype(np.uint8)
+
+    else:
+
+        return np.zeros(h.shape, dtype=np.uint8)
+
+def erode(mask, se=np.ones((3,3), dtype=np.uint8)):
+    return ndimage.binary_erosion(mask, structure=se).astype(np.uint8)
+
+def dilate(mask, se=np.ones((3,3), dtype=np.uint8)):
+    return ndimage.binary_dilation(mask, structure=se).astype(np.uint8)
+
+def opening(mask, se=np.ones((3,3), dtype=np.uint8)):
+    return ndimage.binary_opening(mask, structure=se).astype(np.uint8)
+
+def remove_small_components(mask, min_area=50):
+    labeled, num = ndimage.label(mask)
+    sizes = ndimage.sum(mask, labeled, range(1, num+1))
+    mask_size = sizes >= min_area
+    cleaned = mask.copy()
+
+    for i, keep in enumerate(mask_size, start=1):
+
+        if not keep:
+            cleaned[labeled == i] = 0
+
+    return cleaned
+
+def fill_holes(mask):
+    inv = 1 - mask
+    filled = ndimage.binary_fill_holes(mask).astype(np.uint8)
+
+    return filled
+
+filters.py:
+import numpy as np
+import cv2
+
+
+
+def mean_filter(img, k=3):
+    pad = k // 2
+    h, w = img.shape[:2]
+    out = np.zeros_like(img, dtype=np.float32)
+    padded = np.pad(img, ((pad, pad), (pad, pad), (0,0)), mode='reflect')
+    kernel = np.ones((k, k)) / (k*k)
+    for y in range(h):
+
+        for x in range(w):
+            region = padded[y:y+k, x:x+k]
+            out[y, x] = (region * kernel[...,None]).sum(axis=(0,1))
+
+    return out.astype(img.dtype)
+
+def gaussian_kernel1d(sigma, radius=None):
+    
+    if radius is None:
+        radius = int(3 * sigma)
+    
+    x = np.arange(-radius, radius+1)
+    g = np.exp(-(x**2)/(2*sigma**2))
+    g /= g.sum()
+    
+    return g
+
+def gaussian_filter(img, sigma=1.0):
+    radius = int(3 * sigma)
+    kernel = gaussian_kernel1d(sigma, radius)
+
+    if img.ndim == 2:  # Grayscale
+        padded = np.pad(img, ((radius, radius), (radius, radius)), mode='reflect')
+        temp = np.zeros_like(padded, dtype=np.float32)
+
+        # Convolving along x-axis
+        for i in range(padded.shape[0]):
+            temp[i, :] = np.convolve(padded[i, :], kernel, mode='same')
+
+        temp = temp[radius:-radius, :]  # Remove vertical padding
+        out = np.zeros_like(img, dtype=np.float32)
+
+        # Convolving along y-axis
+        for j in range(out.shape[1]):
+            out[:, j] = np.convolve(temp[:, j], kernel, mode='same')
+
+    elif img.ndim == 3:  # Color
+        padded = np.pad(img, ((radius, radius), (radius, radius), (0, 0)), mode='reflect')
+        temp = np.zeros_like(padded, dtype=np.float32)
+
+        # Convolving along x-axis for each channel
+        for c in range(3):
+            
+            for i in range(padded.shape[0]):
+                temp[i, :, c] = np.convolve(padded[i, :, c], kernel, mode='same')
+
+        temp = temp[radius:-radius, :, :]  # Remove vertical padding
+        out = np.zeros_like(img, dtype=np.float32)
+
+        # Convolving along y-axis for each channel
+        for c in range(3):
+            
+            for j in range(out.shape[1]):
+                out[:, j, c] = np.convolve(temp[:, j, c], kernel, mode='same')
+
+    else:
+        raise ValueError(f"Unsupported image dimensions: {img.ndim}")
+
+    out = np.clip(out, 0, 255)
+
+    return out.astype(img.dtype)
+
+def median_filter(img, k=3):
+    pad = k // 2
+    h, w = img.shape[:2]
+    out = np.zeros_like(img)
+    padded = np.pad(img, ((pad,pad),(pad,pad),(0,0)), mode='reflect')
+
+    for y in range(h):
+
+        for x in range(w):
+            region = padded[y:y+k, x:x+k]
+            out[y, x] = np.median(region.reshape(-1, 3), axis=0)
+
+    return out
+
+def adaptive_median_filter(img, max_window_size=7):
+    """
+    Apply adaptive median filtering to an input image.
+
+    Args:
+        img (np.ndarray): Input RGB image.
+        max_window_size (int): Maximum window size for adaptive behavior.
+
+    Returns:
+        np.ndarray: Filtered RGB image.
+    """
+
+    # Ensuring the input is copied safely
+    img = img.copy()
+    out = np.zeros_like(img)
+
+    # For color images, apply filter channel-wise
+    for ch in range(img.shape[2]):
+        padded = np.pad(img[:, :, ch], pad_width=max_window_size//2, mode='reflect')
+        filtered = np.zeros_like(img[:, :, ch])
+
+        for i in range(filtered.shape[0]):
+           
+            for j in range(filtered.shape[1]):
+                window_size = 3
+                done = False
+
+                while not done:
+                    half = window_size // 2
+                    window = padded[i:i + window_size, j:j + window_size]
+
+                    z_min = int(np.min(window))
+                    z_max = int(np.max(window))
+                    z_med = int(np.median(window))
+                    z_xy = int(padded[i + half, j + half])
+
+                    A1 = z_med - z_min
+                    A2 = z_med - z_max
+
+                    if A1 > 0 and A2 < 0:
+                        B1 = z_xy - z_min
+                        B2 = z_xy - z_max
+                  
+                        if B1 > 0 and B2 < 0:
+                            filtered[i, j] = z_xy
+                        else:
+                            filtered[i, j] = z_med
+                  
+                        done = True
+                  
+                    else:
+                        window_size += 2
+                  
+                        if window_size > max_window_size:
+                            filtered[i, j] = z_med
+                            done = True
+
+        out[:, :, ch] = filtered
+
+    return out
+
+def unsharp_mask(img, sigma=1.0, strength=1.5):
+    blurred = gaussian_filter(img, sigma)
+    detail = img.astype(np.float32) - blurred.astype(np.float32)
+    out = img.astype(np.float32) + strength * detail
+    out = np.clip(out, 0, 255)
+    
+    return out.astype(img.dtype)
+
+image_io.py:
+import cv2
+import numpy as np
+
+
+
+def read_image(path):
+    """
+    Read an image from disk using OpenCV and return as NumPy array (RGB).
+    Returns None if read fails.
+    """
+    bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+
+    if bgr is None:
+        return None
+
+    # Convert BGR to RGB
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+    return rgb
