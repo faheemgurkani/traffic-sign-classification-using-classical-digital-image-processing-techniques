@@ -2,6 +2,9 @@
 data/
 results/
 
+# Ignore rough or placeholder files
+src/rough.txt
+
 # Ignore Python cache files
 __pycache__/
 *.pyc

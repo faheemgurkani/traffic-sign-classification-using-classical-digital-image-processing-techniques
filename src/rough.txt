@@ -12,6 +12,7 @@ from edge_detection import canny_edge
 from normalization import affine_transform
 from features import harris_corners, compute_circularity, aspect_ratio_and_extent, average_hue, extract_roi_props, count_vertices
 from classifier import classify_sign
+from evaluation import compute_and_save_metrics
 
 
 
@@ -89,8 +90,8 @@ def process_image(path):
     # Classification
     cid = classify_sign(features)
 
-    # For, testing
-    print(f"cid: {cid}, features: {features}")
+    # # For, testing
+    # print(f"cid: {cid}, features: {features}")
     
     return cid, features
 
@@ -117,7 +118,7 @@ def run_pipeline(selected_csv, data_root, output_results):
         print()
         for idx, row in enumerate(reader):
             
-            if idx == 7:
+            if idx == 350:
                 break
 
             rel = row['Path']
@@ -145,13 +146,15 @@ def run_pipeline(selected_csv, data_root, output_results):
         print("\n[Info] Pipeline completed.")
     print(f"\n[Done] Results written to {output_results}")
 
+    compute_and_save_metrics(output_results, results_dir)
 
 
 if __name__ == '__main__':
     selected_csv = '../data/selected.csv'
     data_root = '../data/selected'
-    output_results = '../results/results.csv'  
+    output_results = '../results/results.csv'
     run_pipeline(selected_csv, data_root, output_results)
+
 
 classifier.py:
 import numpy as np
@@ -180,159 +183,69 @@ import numpy as np
 #     # fallback
 #     return -1
 
+# def classify_sign(features):
+#     hue = features['avg_hue']
+#     circ = features['circ']
+#     corners = features['corners']
+#     ar = features['ar']
+#     color = features['mask_color']
+
+#     # Speed Limit: almost perfect circle, hardly any vertices
+#     if color=='red' and circ>0.6 and corners<=1:
+#         return 0
+#     # Stop Sign: exactly 8 polygon corners
+#     if color=='red' and corners==8:
+#         return 14
+#     # Yield Sign: triangle (3 vertices)
+#     if color=='red' and corners==3:
+#         return 13
+#     # Keep Right: L-shaped arrow (4 vertices + aspect ratio)
+#     if color=='blue' and corners==4 and ar>1.2:
+#         return 38
+
+#     return -1
+
 def classify_sign(features):
+    """
+    Rule-based classification for traffic signs according to observed feature standards.
+    Features dict keys:
+      - avg_hue: average hue of segmented region (0–180 scale)
+      - circ: circularity (4π·area/perimeter²)
+      - ar: aspect ratio (width/height)
+      - extent: area/(bounding-box area)
+      - corners: number of vertices from contour approximation
+      - mask_color: 'red' or 'blue'
+    """
     hue = features['avg_hue']
     circ = features['circ']
-    corners = features['corners']
     ar = features['ar']
+    extent = features['extent']
+    corners = features['corners']
     color = features['mask_color']
 
-    # Speed Limit: almost perfect circle, hardly any vertices
-    if color=='red' and circ>0.6 and corners<=1:
+    # 0 & 1: Speed Limit signs (circular, ~17 vertices, ar≈1, circ≈0.75)
+    if color == 'red' and (0.7 < circ < 0.85) and (15 <= corners <= 20) and (abs(ar - 1.0) < 0.2):
         return 0
-    # Stop Sign: exactly 8 polygon corners
-    if color=='red' and corners==8:
-        return 14
-    # Yield Sign: triangle (3 vertices)
-    if color=='red' and corners==3:
+
+    # 13: Yield Sign (triangle)
+    if color == 'red' and corners == 3 and (0.6 < circ < 0.75):
         return 13
-    # Keep Right: L-shaped arrow (4 vertices + aspect ratio)
-    if color=='blue' and corners==4 and ar>1.2:
+
+    # 14: Stop Sign (octagon)
+    if color == 'red' and corners == 8 and (0.9 < circ <= 1.0):
+        return 14
+
+    # 17: Other red sign (e.g., No Entry: lower circularity, ~16–18 vertices)
+    if color == 'red' and (0.5 < circ < 0.7) and (12 <= corners <= 25):
+        return 17
+
+    # 38: Keep Right (blue arrow, 4 vertices, elongated)
+    if color == 'blue' and (corners == 4 and ar > 1.2):
         return 38
 
+    # fallback
     return -1
 
-features.py:
-import numpy as np
-from scipy import ndimage
-
-
-
-def harris_corners(gray, window=3, k=0.04, thresh=1e-5):
-    # gradients
-    gx = ndimage.sobel(gray, axis=1)
-    gy = ndimage.sobel(gray, axis=0)
-    Ixx = gx*gx
-    Iyy = gy*gy
-    Ixy = gx*gy
-    
-    # response
-    offset = window//2
-    R = np.zeros_like(gray, dtype=np.float32)
-    
-    for y in range(offset, gray.shape[0]-offset):
-    
-        for x in range(offset, gray.shape[1]-offset):
-            Sxx = Ixx[y-offset:y+offset+1, x-offset:x+offset+1].sum()
-            Syy = Iyy[y-offset:y+offset+1, x-offset:x+offset+1].sum()
-            Sxy = Ixy[y-offset:y+offset+1, x-offset:x+offset+1].sum()
-            det = (Sxx * Syy) - (Sxy**2)
-            trace = Sxx + Syy
-            R[y, x] = det - k * (trace**2)
-    
-    # non-max suppression
-    corners = (R > thresh)
-    
-    return np.count_nonzero(corners)
-
-def count_vertices(mask):
-    """Count polygon vertices from the largest contour in a binary mask."""
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours:
-        return 0
-    
-    cnt = max(contours, key=cv2.contourArea)
-    peri = cv2.arcLength(cnt, True)
-    epsilon = 0.02 * peri
-    approx = cv2.approxPolyDP(cnt, epsilon, True)
-    
-    return len(approx)
-
-def compute_circularity(mask):
-    # mask: binary
-    area = np.count_nonzero(mask)
-    
-    # perimeter via edge detection on mask
-    eroded = ndimage.binary_erosion(mask)
-    perimeter = area - np.count_nonzero(eroded)
-    
-    if perimeter == 0:
-        return 0
-    
-    return (4 * np.pi * area) / (perimeter**2)
-
-def aspect_ratio_and_extent(mask):
-    y_idxs, x_idxs = np.nonzero(mask)
-
-    if x_idxs.size == 0 or y_idxs.size == 0:
-        return 0.0, 0.0  # Safe default values if mask is empty
-
-    min_x, max_x = x_idxs.min(), x_idxs.max()
-    min_y, max_y = y_idxs.min(), y_idxs.max()
-    width = max_x - min_x + 1
-    height = max_y - min_y + 1
-    area = mask.sum()
-    bbox_area = width * height
-    ar = width / float(height) if height > 0 else 0.0
-    extent = area / float(bbox_area) if bbox_area > 0 else 0.0
-
-    return ar, extent
-
-def average_hue(hsv, mask):
-    h = hsv[...,0]
-    vals = h[mask.astype(bool)]
-    
-    return float(vals.mean()) if vals.size>0 else 0.0
-
-def extract_roi_props(mask):
-    """
-    Compute ROI bounding box and image dims from binary mask.
-    Returns: (width, height, x1, y1, x2, y2)
-    where (x1,y1) is top-left and (x2,y2) bottom-right of ROI.
-    """
-    y_idxs, x_idxs = np.nonzero(mask)
-
-    if x_idxs.size == 0 or y_idxs.size == 0:
-        return 0, 0, 0, 0, 0, 0
-    
-    x1, x2 = x_idxs.min(), x_idxs.max()
-    y1, y2 = y_idxs.min(), y_idxs.max()
-    width = x2 - x1 + 1
-    height = y2 - y1 + 1
-    
-    return width, height, x1, y1, x2, y2
-
-normalization.py:
-import numpy as np
-
-
-
-def affine_transform(img, matrix, output_shape):
-    h_out, w_out = output_shape
-    inv = np.linalg.inv(np.vstack([matrix, [0,0,1]]))
-    out = np.zeros((h_out, w_out, img.shape[2]), dtype=img.dtype)
-
-    for y in range(h_out):
-
-        for x in range(w_out):
-            src = inv.dot([x, y, 1])
-            sx, sy = src[0], src[1]
-
-            if 0 <= sx < img.shape[1]-1 and 0 <= sy < img.shape[0]-1:
-                x0, y0 = int(sx), int(sy)
-                dx, dy = sx-x0, sy-y0
-
-                # bilinear interp
-                for c in range(img.shape[2]):
-                    v = (img[y0, x0, c] * (1-dx)*(1-dy) +
-                         img[y0, x0+1, c] * dx*(1-dy) +
-                         img[y0+1, x0, c] * (1-dx)*dy +
-                         img[y0+1, x0+1, c] * dx*dy)
-
-                    out[y, x, c] = int(v)
-
-    return out
 
 edge_detection.py:
 import numpy as np
@@ -410,91 +323,219 @@ def canny_edge(gray, low=50, high=150):
     
     return edges
 
-segmentation.py:
+
+evaluation.py:
+import os
+import csv
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+
+def compute_and_save_metrics(results_csv, results_dir):
+    """
+    Reads results CSV, computes overall accuracy, class-wise precision and recall,
+    writes metrics.csv and metrics.txt, and saves a confusion matrix heatmap.
+    """
+    # Loading predictions and ground truths
+    y_true = []
+    y_pred = []
+    
+    with open(results_csv, newline='') as f:
+        reader = csv.DictReader(f)
+    
+        for row in reader:
+            y_true.append(int(row['ground_truth']))
+            y_pred.append(int(row['predicted']))
+    
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+
+    # Identifying classes
+    classes = sorted(set(y_true))
+    n_classes = len(classes)
+    class_to_idx = {c: i for i, c in enumerate(classes)}
+
+    # Building confusion matrix
+    cm = np.zeros((n_classes, n_classes), dtype=int)
+    
+    for t, p in zip(y_true, y_pred):
+    
+        if p in class_to_idx and t in class_to_idx:
+            cm[class_to_idx[t], class_to_idx[p]] += 1
+
+    # Computing overall accuracy
+    total = y_true.shape[0]
+    correct = (y_true == y_pred).sum()
+    overall_acc = correct / total if total > 0 else 0
+
+    # Computing class-wise precision, recall, support
+    precision = []
+    recall = []
+    support = []
+    
+    for idx, c in enumerate(classes):
+        tp = cm[idx, idx]
+        fp = cm[:, idx].sum() - tp
+        fn = cm[idx, :].sum() - tp
+        precision.append(tp / (tp + fp) if (tp + fp) > 0 else 0)
+        recall.append(tp / (tp + fn) if (tp + fn) > 0 else 0)
+        support.append(cm[idx, :].sum())
+
+    # Saving metrics.csv
+    metrics_csv = os.path.join(results_dir, 'metrics.csv')
+    
+    with open(metrics_csv, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['class_id', 'precision', 'recall', 'support'])
+    
+        for c, p, r, s in zip(classes, precision, recall, support):
+            writer.writerow([c, f'{p:.4f}', f'{r:.4f}', s])
+    
+        writer.writerow(['overall_accuracy', f'{overall_acc:.4f}', '', total])
+
+    # Save metrics.txt
+    metrics_txt = os.path.join(results_dir, 'metrics.txt')
+    
+    with open(metrics_txt, 'w') as f:
+        f.write(f'Overall accuracy: {overall_acc:.4f}\n')
+        f.write('Class-wise precision and recall:\n')
+    
+        for c, p, r in zip(classes, precision, recall):
+            f.write(f'Class {c}: Precision={p:.4f}, Recall={r:.4f}\n')
+
+    # Plot and save confusion matrix heatmap
+    plt.figure(figsize=(8, 6))
+    plt.imshow(cm, interpolation='nearest', cmap='Blues')
+    plt.title('Confusion Matrix')
+    plt.colorbar()
+    tick_marks = np.arange(n_classes)
+    plt.xticks(tick_marks, classes, rotation=45)
+    plt.yticks(tick_marks, classes)
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+
+    # Annotate counts
+    thresh = cm.max() / 2
+    
+    for i in range(n_classes):
+    
+        for j in range(n_classes):
+            plt.text(j, i, cm[i, j],
+                     horizontalalignment='center',
+                     color='white' if cm[i, j] > thresh else 'black')
+    plt.tight_layout()
+
+    cm_path = os.path.join(results_dir, 'confusion_matrix.png')
+    plt.savefig(cm_path)
+    plt.close()
+
+    print(f"\n[Done] Metrics saved to {metrics_csv} and {metrics_txt}")
+    print(f"\n[Done] Confusion matrix image saved to {cm_path}")
+
+
+features.py:
 import numpy as np
 from scipy import ndimage
+import cv2
 
 
 
-def rgb_to_hsv(img):
-    # Input: img in RGB [0,255]
-    rgb = img.astype('float32') / 255.0
-    r, g, b = rgb[...,0], rgb[...,1], rgb[...,2]
-    c_max = rgb.max(axis=2)
-    c_min = rgb.min(axis=2)
-    delta = c_max - c_min
-    h = np.zeros_like(c_max)
-    mask = delta != 0
+def harris_corners(gray, window=3, k=0.04, thresh=1e-5):
+    # gradients
+    gx = ndimage.sobel(gray, axis=1)
+    gy = ndimage.sobel(gray, axis=0)
+    Ixx = gx*gx
+    Iyy = gy*gy
+    Ixy = gx*gy
 
-    # Hue calculation
-    idx = (c_max == r) & mask
-    h[idx] = ((g[idx] - b[idx]) / delta[idx]) % 6
-    idx = (c_max == g) & mask
-    h[idx] = (b[idx] - r[idx]) / delta[idx] + 2
-    idx = (c_max == b) & mask
-    h[idx] = (r[idx] - g[idx]) / delta[idx] + 4
-    # h = h * 60
-    # h[h < 0] += 360
+    # response
+    offset = window//2
+    R = np.zeros_like(gray, dtype=np.float32)
     
-    # convert to degrees
-    h = h * 60
-    h[h < 0] += 360
-    # scaling to OpenCV's 0–180 hue range
-    h = h / 2.0
-
-    # Saturation
-    s = np.where(c_max == 0, 0, delta / c_max)
-
-    # Value
-    v = c_max
-
-    return np.stack([h, s*255, v*255], axis=2).astype(np.uint8)
-
-def threshold_mask(hsv, color):
-    h, s, v = hsv[...,0], hsv[...,1], hsv[...,2]
+    for y in range(offset, gray.shape[0]-offset):
     
-    if color == 'red':
-        mask1 = (h <= 15) | (h >= 165)
-        mask2 = (s >= 100) & (v >= 80)
+        for x in range(offset, gray.shape[1]-offset):
+            Sxx = Ixx[y-offset:y+offset+1, x-offset:x+offset+1].sum()
+            Syy = Iyy[y-offset:y+offset+1, x-offset:x+offset+1].sum()
+            Sxy = Ixy[y-offset:y+offset+1, x-offset:x+offset+1].sum()
+            det = (Sxx * Syy) - (Sxy**2)
+            trace = Sxx + Syy
+            R[y, x] = det - k * (trace**2)
+
+    # non-max suppression
+    corners = (R > thresh)
+
+    return np.count_nonzero(corners)
+
+def count_vertices(mask):
+    """Count polygon vertices from the largest contour in a binary mask."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-        return (mask1 & mask2).astype(np.uint8)
-
-    elif color == 'blue':
-        mask = (h >= 100) & (h <= 130) & (s >= 100) & (v >= 80)
+    if not contours:
+        return 0
     
-        return mask.astype(np.uint8)
+    cnt = max(contours, key=cv2.contourArea)
+    peri = cv2.arcLength(cnt, True)
+    epsilon = 0.02 * peri
+    approx = cv2.approxPolyDP(cnt, epsilon, True)
+    
+    return len(approx)
 
-    else:
+def compute_circularity(mask):
+    # mask: binary
+    area = np.count_nonzero(mask)
+    
+    # perimeter via edge detection on mask
+    eroded = ndimage.binary_erosion(mask)
+    perimeter = area - np.count_nonzero(eroded)
+    
+    if perimeter == 0:
+        return 0
+    
+    return (4 * np.pi * area) / (perimeter**2)
 
-        return np.zeros(h.shape, dtype=np.uint8)
+def aspect_ratio_and_extent(mask):
+    y_idxs, x_idxs = np.nonzero(mask)
 
-def erode(mask, se=np.ones((3,3), dtype=np.uint8)):
-    return ndimage.binary_erosion(mask, structure=se).astype(np.uint8)
+    if x_idxs.size == 0 or y_idxs.size == 0:
+        return 0.0, 0.0  # Safe default values if mask is empty
 
-def dilate(mask, se=np.ones((3,3), dtype=np.uint8)):
-    return ndimage.binary_dilation(mask, structure=se).astype(np.uint8)
+    min_x, max_x = x_idxs.min(), x_idxs.max()
+    min_y, max_y = y_idxs.min(), y_idxs.max()
+    width = max_x - min_x + 1
+    height = max_y - min_y + 1
+    area = mask.sum()
+    bbox_area = width * height
+    ar = width / float(height) if height > 0 else 0.0
+    extent = area / float(bbox_area) if bbox_area > 0 else 0.0
 
-def opening(mask, se=np.ones((3,3), dtype=np.uint8)):
-    return ndimage.binary_opening(mask, structure=se).astype(np.uint8)
+    return ar, extent
 
-def remove_small_components(mask, min_area=50):
-    labeled, num = ndimage.label(mask)
-    sizes = ndimage.sum(mask, labeled, range(1, num+1))
-    mask_size = sizes >= min_area
-    cleaned = mask.copy()
+def average_hue(hsv, mask):
+    h = hsv[...,0]
+    vals = h[mask.astype(bool)]
+    
+    return float(vals.mean()) if vals.size>0 else 0.0
 
-    for i, keep in enumerate(mask_size, start=1):
+def extract_roi_props(mask):
+    """
+    Compute ROI bounding box and image dims from binary mask.
+    Returns: (width, height, x1, y1, x2, y2)
+    where (x1,y1) is top-left and (x2,y2) bottom-right of ROI.
+    """
+    y_idxs, x_idxs = np.nonzero(mask)
 
-        if not keep:
-            cleaned[labeled == i] = 0
+    if x_idxs.size == 0 or y_idxs.size == 0:
+        return 0, 0, 0, 0, 0, 0
+    
+    x1, x2 = x_idxs.min(), x_idxs.max()
+    y1, y2 = y_idxs.min(), y_idxs.max()
+    width = x2 - x1 + 1
+    height = y2 - y1 + 1
+    
+    return width, height, x1, y1, x2, y2
 
-    return cleaned
-
-def fill_holes(mask):
-    inv = 1 - mask
-    filled = ndimage.binary_fill_holes(mask).astype(np.uint8)
-
-    return filled
 
 filters.py:
 import numpy as np
@@ -655,6 +696,7 @@ def unsharp_mask(img, sigma=1.0, strength=1.5):
     
     return out.astype(img.dtype)
 
+
 image_io.py:
 import cv2
 import numpy as np
@@ -675,3 +717,122 @@ def read_image(path):
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
     return rgb
+
+
+normalization.py:
+import numpy as np
+
+
+
+def affine_transform(img, matrix, output_shape):
+    h_out, w_out = output_shape
+    inv = np.linalg.inv(np.vstack([matrix, [0,0,1]]))
+    out = np.zeros((h_out, w_out, img.shape[2]), dtype=img.dtype)
+
+    for y in range(h_out):
+
+        for x in range(w_out):
+            src = inv.dot([x, y, 1])
+            sx, sy = src[0], src[1]
+
+            if 0 <= sx < img.shape[1]-1 and 0 <= sy < img.shape[0]-1:
+                x0, y0 = int(sx), int(sy)
+                dx, dy = sx-x0, sy-y0
+
+                # bilinear interp
+                for c in range(img.shape[2]):
+                    v = (img[y0, x0, c] * (1-dx)*(1-dy) +
+                         img[y0, x0+1, c] * dx*(1-dy) +
+                         img[y0+1, x0, c] * (1-dx)*dy +
+                         img[y0+1, x0+1, c] * dx*dy)
+
+                    out[y, x, c] = int(v)
+
+    return out
+
+
+segmentation.py:
+import numpy as np
+from scipy import ndimage
+
+
+
+def rgb_to_hsv(img):
+    # Input: img in RGB [0,255]
+    rgb = img.astype('float32') / 255.0
+    r, g, b = rgb[...,0], rgb[...,1], rgb[...,2]
+    c_max = rgb.max(axis=2)
+    c_min = rgb.min(axis=2)
+    delta = c_max - c_min
+    h = np.zeros_like(c_max)
+    mask = delta != 0
+
+    # Hue calculation
+    idx = (c_max == r) & mask
+    h[idx] = ((g[idx] - b[idx]) / delta[idx]) % 6
+    idx = (c_max == g) & mask
+    h[idx] = (b[idx] - r[idx]) / delta[idx] + 2
+    idx = (c_max == b) & mask
+    h[idx] = (r[idx] - g[idx]) / delta[idx] + 4
+    # h = h * 60
+    # h[h < 0] += 360
+    
+    # convert to degrees
+    h = h * 60
+    h[h < 0] += 360
+    # scaling to OpenCV's 0–180 hue range
+    h = h / 2.0
+
+    # Saturation
+    s = np.where(c_max == 0, 0, delta / c_max)
+
+    # Value
+    v = c_max
+
+    return np.stack([h, s*255, v*255], axis=2).astype(np.uint8)
+
+def threshold_mask(hsv, color):
+    h, s, v = hsv[...,0], hsv[...,1], hsv[...,2]
+    
+    if color == 'red':
+        mask1 = (h <= 15) | (h >= 165)
+        mask2 = (s >= 100) & (v >= 80)
+    
+        return (mask1 & mask2).astype(np.uint8)
+
+    elif color == 'blue':
+        mask = (h >= 100) & (h <= 130) & (s >= 100) & (v >= 80)
+    
+        return mask.astype(np.uint8)
+
+    else:
+
+        return np.zeros(h.shape, dtype=np.uint8)
+
+def erode(mask, se=np.ones((3,3), dtype=np.uint8)):
+    return ndimage.binary_erosion(mask, structure=se).astype(np.uint8)
+
+def dilate(mask, se=np.ones((3,3), dtype=np.uint8)):
+    return ndimage.binary_dilation(mask, structure=se).astype(np.uint8)
+
+def opening(mask, se=np.ones((3,3), dtype=np.uint8)):
+    return ndimage.binary_opening(mask, structure=se).astype(np.uint8)
+
+def remove_small_components(mask, min_area=50):
+    labeled, num = ndimage.label(mask)
+    sizes = ndimage.sum(mask, labeled, range(1, num+1))
+    mask_size = sizes >= min_area
+    cleaned = mask.copy()
+
+    for i, keep in enumerate(mask_size, start=1):
+
+        if not keep:
+            cleaned[labeled == i] = 0
+
+    return cleaned
+
+def fill_holes(mask):
+    inv = 1 - mask
+    filled = ndimage.binary_fill_holes(mask).astype(np.uint8)
+
+    return filled
