@@ -3,86 +3,87 @@ import numpy as np
 
 
 # def classify_sign(features):
-#     # features: dict with keys: 'avg_hue','circ','ar','extent','corners','mask_color'
-#     hue = features['avg_hue']
+#     """
+#     Rule-based classification for traffic signs according to observed feature standards.
+#     Features dict keys:
+#       - avg_hue: average hue of segmented region (0–180 scale)
+#       - circ: circularity (4π·area/perimeter²)
+#       - ar: aspect ratio (width/height)
+#       - extent: area/(bounding-box area)
+#       - corners: number of vertices from contour approximation
+#       - mask_color: 'red' or 'blue'
+#     """
+#     # hue = features['avg_hue']
 #     circ = features['circ']
-#     ar, extent = features['ar'], features['extent']
-#     corners = features['corners']
-#     color = features['mask_color']
-    
-#     # Example rules:
-#     # allow “circular” signs with very few corners detected
-#     if color == 'red' and circ > 0.6 and corners <= 2:
-#         return 0   # Speed Limit 20
-#     if color == 'red' and corners==8:
-#         return 14  # Stop sign
-#     if color == 'red' and ar>0.8 and ar<1.2 and corners==3:
-#         return 13  # Yield sign
-#     if color == 'blue' and circ<0.5 and ar>1.5:
-#         return 38  # Keep right
-    
-#     # fallback
-#     return -1
-
-# def classify_sign(features):
-#     hue = features['avg_hue']
-#     circ = features['circ']
-#     corners = features['corners']
 #     ar = features['ar']
+#     # extent = features['extent']
+#     corners = features['corners']
 #     color = features['mask_color']
+#     holes  = features.get('holes', 0)
 
-#     # Speed Limit: almost perfect circle, hardly any vertices
-#     if color=='red' and circ>0.6 and corners<=1:
-#         return 0
-#     # Stop Sign: exactly 8 polygon corners
-#     if color=='red' and corners==8:
-#         return 14
-#     # Yield Sign: triangle (3 vertices)
-#     if color=='red' and corners==3:
+#     # Speed Limit
+#     if color == 'red' and (0.9 < circ <= 1.0) and abs(ar - 1.0) < 0.2:
+#         if holes == 1:
+#             return 0  # Speed Limit 20
+#         elif holes == 2:
+#             return 1  # Speed Limit 30
+#         elif holes == 0:
+#             return 17 # No Entry
+
+#     # Yield Sign (triangle)
+#     if color == 'red' and corners == 3 and (0.6 < circ < 0.75):
 #         return 13
-#     # Keep Right: L-shaped arrow (4 vertices + aspect ratio)
-#     if color=='blue' and corners==4 and ar>1.2:
+
+#     # Stop Sign (octagon)
+#     if color == 'red' and corners == 8 and (0.85 < circ <= 1.0):
+#         return 14
+
+#     # No Entry (round with white minus)
+#     if color == 'red' and (0.5 < circ < 0.7) and (12 <= corners <= 25):
+#         return 17
+
+#     # Keep Right (blue arrow, 4 vertices, elongated)
+#     if color == 'blue' and (corners == 4 and ar > 1.2):
 #         return 38
 
+#     # fallback
 #     return -1
 
 def classify_sign(features):
     """
-    Rule-based classification for traffic signs according to observed feature standards.
-    Features dict keys:
-      - avg_hue: average hue of segmented region (0–180 scale)
-      - circ: circularity (4π·area/perimeter²)
-      - ar: aspect ratio (width/height)
-      - extent: area/(bounding-box area)
-      - corners: number of vertices from contour approximation
-      - mask_color: 'red' or 'blue'
+    Redesigned rules to match the observed feature patterns.
+    Features:
+      - avg_hue: average hue
+      - circ: circularity
+      - ar: aspect ratio (not used below)
+      - extent: area / bbox_area
+      - holes: count of dark connected blobs in ROI
     """
-    hue = features['avg_hue']
-    circ = features['circ']
-    ar = features['ar']
-    extent = features['extent']
-    corners = features['corners']
-    color = features['mask_color']
 
-    # 0 & 1: Speed Limit signs (circular, ~17 vertices, ar≈1, circ≈0.75)
-    if color == 'red' and (0.7 < circ < 0.85) and (15 <= corners <= 20) and (abs(ar - 1.0) < 0.2):
-        return 0
+    hue   = features['avg_hue']
+    circ  = features['circ']
+    ext   = features['extent']
+    holes = features['holes']
 
-    # 13: Yield Sign (triangle)
-    if color == 'red' and corners == 3 and (0.6 < circ < 0.75):
-        return 13
-
-    # 14: Stop Sign (octagon)
-    if color == 'red' and corners == 8 and (0.9 < circ <= 1.0):
-        return 14
-
-    # 17: Other red sign (e.g., No Entry: lower circularity, ~16–18 vertices)
-    if color == 'red' and (0.5 < circ < 0.7) and (12 <= corners <= 25):
-        return 17
-
-    # 38: Keep Right (blue arrow, 4 vertices, elongated)
-    if color == 'blue' and (corners == 4 and ar > 1.2):
+    # 1) KEEP RIGHT (38): the only blue sign → very high hue
+    if hue > 120:
         return 38
 
-    # fallback
+    # 2) NO ENTRY (17): big red disc with a white bar → extremely low circularity & very low fill
+    if circ < 0.3 and ext < 0.5:
+        return 17
+
+    # 3) SPEED LIMIT 20 (0) vs 30 (1): both are red circles, distinguish by holes in the “20” vs “30”
+    if 0.4 < circ < 0.9 and ext > 0.6 and holes in (1, 2):
+        return 0 if holes == 1 else 1
+
+    # 4) STOP (14): red octagon → very high circularity on your mask (>0.85) and moderate fill
+    if circ > 0.85 and ext > 0.6:
+        return 14
+
+    # 5) YIELD (13): red triangle → intermediate circularity and fairly high fill
+    if 0.3 < circ < 0.85 and ext > 0.6:
+        return 13
+
+    # 6) anything else → unknown
     return -1

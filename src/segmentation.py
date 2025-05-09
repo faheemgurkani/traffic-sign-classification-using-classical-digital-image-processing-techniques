@@ -41,19 +41,37 @@ def threshold_mask(hsv, color):
     h, s, v = hsv[...,0], hsv[...,1], hsv[...,2]
     
     if color == 'red':
-        mask1 = (h <= 15) | (h >= 165)
-        mask2 = (s >= 100) & (v >= 80)
+        # mask1 = (h <= 15) | (h >= 165)
+        # mask2 = (s >= 100) & (v >= 80)
+
+        # mask1 = (h <= 20) | (h >= 160)
+        # mask2 = (s >= 60) & (v >= 60)
+        
+        mask1 = (h <= 25) | (h >= 155)
+        mask2 = (s >= 50) & (v >= 50)
     
-        return (mask1 & mask2).astype(np.uint8)
+        mask = mask1 & mask2
 
     elif color == 'blue':
-        mask = (h >= 100) & (h <= 130) & (s >= 100) & (v >= 80)
-    
-        return mask.astype(np.uint8)
+        # mask = (h >= 100) & (h <= 130) & (s >= 100) & (v >= 80)
+
+        # mask = (h >= 90) & (h <= 140) & (s >= 60) & (v >= 60)
+        
+        mask = (h >= 85) & (h <= 145) & (s >= 50) & (v >= 50)
 
     else:
+        mask = np.zeros_like(h, dtype=bool)
 
-        return np.zeros(h.shape, dtype=np.uint8)
+        # return np.zeros(h.shape, dtype=np.uint8)
+
+    # return mask.astype(np.uint8)
+    
+    # first close small gaps in the border, then return
+    from scipy import ndimage
+    
+    mask = ndimage.binary_closing(mask, structure=np.ones((5,5)))
+    
+    return mask.astype(np.uint8)
 
 def erode(mask, se=np.ones((3,3), dtype=np.uint8)):
     return ndimage.binary_erosion(mask, structure=se).astype(np.uint8)

@@ -65,6 +65,7 @@ def compute_and_save_metrics(results_csv, results_dir):
         for c, p, r, s in zip(classes, precision, recall, support):
             writer.writerow([c, f'{p:.4f}', f'{r:.4f}', s])
     
+        writer.writerow([])
         writer.writerow(['overall_accuracy', f'{overall_acc:.4f}', '', total])
 
     # Save metrics.txt

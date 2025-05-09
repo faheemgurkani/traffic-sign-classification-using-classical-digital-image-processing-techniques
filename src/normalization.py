@@ -27,3 +27,29 @@ def affine_transform(img, matrix, output_shape):
                     out[y, x, c] = int(v)
 
     return out
+
+def resize(img, output_shape):
+    """
+    img: H×W×C or H×W mask; output_shape = (H_out, W_out)
+    """
+    H, W = img.shape[:2]
+    H_out, W_out = output_shape
+    
+    # scale factors
+    sx, sy = W_out / W, H_out / H
+    
+    # affine matrix: [ [sx, 0, 0], [0, sy, 0] ]
+    M = np.array([[sx, 0, 0],
+                  [0, sy, 0]])
+    
+    # reuse existing affine_transform
+    from normalization import affine_transform
+    
+    if img.ndim == 2:
+        # treat mask as single channel
+        img3 = img[:,:,None]
+        resized = affine_transform(img3, M, output_shape)
+    
+        return resized[:,:,0]
+    else:
+        return affine_transform(img, M, output_shape)

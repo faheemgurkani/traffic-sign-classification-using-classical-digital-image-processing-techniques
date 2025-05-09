@@ -98,3 +98,23 @@ def extract_roi_props(mask):
     height = y2 - y1 + 1
     
     return width, height, x1, y1, x2, y2
+
+def count_text_holes(gray, mask, thresh=80):
+    """
+    Count dark blobs (holes) inside the sign area.
+    gray: 2D gray image, mask: 2D binary mask
+    """
+    # isolate potential text: dark pixels within mask
+    # text = ((gray < thresh) & (mask.astype(bool))).astype(np.uint8)
+    
+    # try a more forgiving threshold for small images
+    t = thresh or 100
+    text = ((gray < t) & (mask.astype(bool))).astype(np.uint8)
+    
+    # remove tiny specks
+    text = ndimage.binary_opening(text, structure=np.ones((3,3))).astype(np.uint8)
+    
+    # count connected components
+    _, num = ndimage.label(text)
+    
+    return num
