@@ -156,6 +156,7 @@ def run_pipeline(selected_csv, data_root, output_results):
             processed += 1
             
             print(f"[Progress] Processed {processed}/{total}: {rel} (GT: {gt}, Predicted: {pred})")
+            # print()
 
         print("\n[Info] Pipeline completed.")
     print(f"\n[Done] Results written to {output_results}")
